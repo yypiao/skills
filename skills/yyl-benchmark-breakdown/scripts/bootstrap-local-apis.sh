@@ -5,7 +5,7 @@ set -euo pipefail
 
 DOUYIN_API_BASE="${DOUYIN_API_BASE:-http://localhost:80}"
 DOUYIN_CONTAINER_NAME="${DOUYIN_CONTAINER_NAME:-douyin_tiktok_api}"
-DOUYIN_IMAGE="${DOUYIN_IMAGE:-evil0ctal/douyin_tiktok_download_api:latest}"
+DOUYIN_IMAGE="${DOUYIN_IMAGE:-evil0ctal/douyin_tiktok_download_api:V4.1.2}"
 DOUYIN_PORT="${DOUYIN_PORT:-80}"
 
 XHS_API_BASE="${XHS_API_BASE:-http://127.0.0.1:5556}"

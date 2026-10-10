@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # yyl-benchmark-breakdown 依赖自检
 # 跑这个看缺什么、对应装什么。所有检测都是只读,不会动你系统。
+# Usage: bash scripts/check-deps.sh [--local-video]
 
 set -u
 GREEN="\033[32m"; RED="\033[31m"; YELLOW="\033[33m"; DIM="\033[2m"; NC="\033[0m"
@@ -13,13 +14,20 @@ hint()  { echo -e "  ${DIM}→ $1${NC}"; }
 echo "=== yyl-benchmark-breakdown 依赖自检 ==="
 echo ""
 
+LOCAL_VIDEO=0
+if [[ "${1:-}" == "--local-video" ]]; then
+  LOCAL_VIDEO=1
+fi
+
 ESSENTIAL_MISS=0
 OPTIONAL_MISS=0
 
 # ─── 必需:Docker(用于本地下载 API)───────────────────────────────
 echo "▎Docker(本地下载 API 运行环境)"
 DOCKER_READY=0
-if command -v docker >/dev/null 2>&1; then
+if [[ $LOCAL_VIDEO -eq 1 ]]; then
+  warn "本地视频模式:跳过 Docker / 本地平台 API 要求"
+elif command -v docker >/dev/null 2>&1; then
   ok "docker CLI 已安装"
   if docker info >/dev/null 2>&1; then
     ok "Docker daemon 已启动"
@@ -40,7 +48,9 @@ echo ""
 
 # ─── 必需:本地 Douyin_TikTok_Download_API ──────────────────────────
 echo "▎本地下载 API(主力:抖音 / TikTok / Bilibili)"
-if curl -sSf -m 3 "${DOUYIN_API_BASE:-http://localhost:80}/docs" >/dev/null 2>&1; then
+if [[ $LOCAL_VIDEO -eq 1 ]]; then
+  warn "本地视频模式:跳过 Douyin_TikTok_Download_API"
+elif curl -sSf -m 3 "${DOUYIN_API_BASE:-http://localhost:80}/docs" >/dev/null 2>&1; then
   ok "本地 API 可达:${DOUYIN_API_BASE:-http://localhost:80}"
 else
   miss "本地 API 不可达(${DOUYIN_API_BASE:-http://localhost:80})"
@@ -58,7 +68,9 @@ echo ""
 echo "▎XHS-Downloader API(主力:小红书)"
 XHS_BASE="${XHS_API_BASE:-http://127.0.0.1:5556}"
 XHS_CONTAINER="${XHS_CONTAINER_NAME:-xhs-downloader-api}"
-if [[ -z "${XHS_DOWNLOAD_DIR:-}" ]] && command -v docker >/dev/null 2>&1; then
+if [[ $LOCAL_VIDEO -eq 1 ]]; then
+  warn "本地视频模式:跳过 XHS-Downloader API"
+elif [[ -z "${XHS_DOWNLOAD_DIR:-}" ]] && command -v docker >/dev/null 2>&1; then
   XHS_VOLUME_DIR="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/app/Volume"}}{{.Source}}{{end}}{{end}}' "$XHS_CONTAINER" 2>/dev/null || true)"
   if [[ -n "$XHS_VOLUME_DIR" ]]; then
     XHS_DOWNLOAD_DIR="$XHS_VOLUME_DIR/Download"
@@ -68,7 +80,9 @@ if [[ -z "${XHS_DOWNLOAD_DIR:-}" ]] && command -v docker >/dev/null 2>&1; then
 else
   XHS_DOWNLOAD_DIR="${XHS_DOWNLOAD_DIR:-$HOME/.xhs-downloader/Volume/Download}"
 fi
-if curl -sSf -m 3 "$XHS_BASE/docs" >/dev/null 2>&1; then
+if [[ $LOCAL_VIDEO -eq 1 ]]; then
+  warn "本地视频模式:跳过 XHS 下载目录"
+elif curl -sSf -m 3 "$XHS_BASE/docs" >/dev/null 2>&1; then
   ok "XHS API 可达:$XHS_BASE"
   if docker ps --filter name="$XHS_CONTAINER" --format '{{.Names}}' 2>/dev/null | grep -q "^${XHS_CONTAINER}$"; then
     ok "容器运行中:$XHS_CONTAINER"
@@ -114,6 +128,19 @@ else
   hint "或:  pip install -U openai-whisper"
   hint "首次跑会自动下载 medium 模型(~1.5GB)"
   ESSENTIAL_MISS=$((ESSENTIAL_MISS+1))
+fi
+echo ""
+
+echo "▎无图片输入时的视觉回退(macOS Vision OCR + PIL)"
+if [[ "$(uname -s)" == "Darwin" ]] && command -v swiftc >/dev/null 2>&1; then
+  ok "swiftc 可用:可编译 Vision OCR"
+else
+  warn "swiftc 不可用:OCR 回退将不可用(不阻塞 URL 主流程)"
+fi
+if python3 -c 'import PIL' >/dev/null 2>&1; then
+  ok "Python PIL 可用:可量化亮度/饱和度/对比度"
+else
+  warn "Python PIL 不可用:画面量化将跳过"
 fi
 echo ""
 

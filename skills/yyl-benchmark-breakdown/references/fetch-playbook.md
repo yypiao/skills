@@ -150,79 +150,85 @@ curl -s "https://r.jina.ai/<完整url>"
 
 ---
 
-## 3. 短视频:下载 + 转写口播 + 抽视觉帧(三步都做)
+## 3. 短视频:读取/下载 + 自动语言转写 + 抽视觉帧
 
-**铁律:抖音 / TikTok / B站 / YouTube / 小红书视频笔记拆解必须有口播 + 画面证据。** 只看 caption + 数据做不了脚本层;只看口播会漏掉视觉钩子、剪辑节奏、字幕样式等画面层证据。视觉拆解维度见 `visual-framework.md`。
-
-```bash
-mkdir -p /tmp/bm/frames
-
-# a) 下视频(必须带 Referer 防盗链)
-curl -L -A "Mozilla/5.0" -H "Referer: https://www.douyin.com/" \
-  "<download_addr>" -o /tmp/bm/video.mp4
-
-# 小红书视频已由 XHS-Downloader 下载时,直接复制最近的 mp4 作为输入
-# cp "${XHS_DOWNLOAD_DIR:-$HOME/.xhs-downloader/Volume/Download}/<文件名>.mp4" /tmp/bm/video.mp4
-
-# b) 抽音轨(16kHz mono,whisper 最快)
-ffmpeg -y -i /tmp/bm/video.mp4 -vn -ac 1 -ar 16000 -c:a pcm_s16le /tmp/bm/audio.wav -loglevel error
-
-# c) 转写(中文用 medium 起步,精度要更高换 large-v3,但慢 3-4 倍)
-whisper /tmp/bm/audio.wav --model medium --language Chinese \
-  --output_dir /tmp/bm --output_format txt --task transcribe
-# 输出: /tmp/bm/audio.txt
-
-# d) 视觉:场景切点检测(每个切点抽一帧,拿剪辑节奏)
-ffmpeg -i /tmp/bm/video.mp4 -vf "select='gt(scene,0.3)',showinfo" \
-  -fps_mode vfr /tmp/bm/frames/cut_%03d.jpg 2>/tmp/bm/cuts.log
-
-# e) 视觉:前 3 秒钩子细抽(每 1 秒一帧,共 3 帧,锁住前 3 秒钩子)
-ffmpeg -i /tmp/bm/video.mp4 -t 3 -vf "fps=1" -fps_mode vfr /tmp/bm/frames/hook_%03d.jpg -loglevel error
-
-# f) 视觉:整体节奏补抽(每 3 秒一帧,短视频<60s 可改 fps=1/2)
-ffmpeg -i /tmp/bm/video.mp4 -vf "fps=1/3" -fps_mode vfr /tmp/bm/frames/t_%03d.jpg -loglevel error
-
-# g) 视觉:拼 contact sheet(6x6=36 张/页,超过自动分多张 sheet_NNN.jpg)
-ffmpeg -pattern_type glob -i "/tmp/bm/frames/*.jpg" \
-  -filter_complex "scale=320:-1,tile=6x6:padding=4:color=white" \
-  -fps_mode vfr /tmp/bm/sheet_%03d.jpg -loglevel error
-
-# h) 算剪辑节奏(平均 X 秒一切)—— 用 awk 兼容 macOS BSD bc
-TOTAL_CUTS=$(grep -c "pts_time" /tmp/bm/cuts.log)
-DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 /tmp/bm/video.mp4)
-AVG=$(awk -v d="$DURATION" -v c="$TOTAL_CUTS" 'BEGIN { printf "%.2f", d/c }')
-echo "切点数: $TOTAL_CUTS / 时长: ${DURATION}s / 平均 ${AVG} 秒一切"
-```
-
-产出三样:
-- `/tmp/bm/audio.txt` — 口播文字稿(脚本层证据)
-- `/tmp/bm/sheet_*.jpg` — 视觉 contact sheet,可能多张(**用 Read 工具逐张读图,让模型多模态看**)
-- `/tmp/bm/cuts.log` — 切点时间戳(对齐口播段落,看画面/口播协同方式)
-
-### 小红书图文:拼图序 contact sheet
-图文没有音轨,但图序就是脚本。必须把图片按顺序读一遍,不要只看标题。
+**铁律:抖音 / TikTok / B站 / YouTube / 小红书视频笔记必须有口播 + 画面证据。**只看 caption、互动数据或只看口播都不够。URL 和本地视频都统一走:
 
 ```bash
-mkdir -p /tmp/bm/xhs_images
-
-# 从下载目录复制本条笔记的图片;如果下载器为单作品建了文件夹,优先复制该文件夹内图片
-# cp "${XHS_DOWNLOAD_DIR:-$HOME/.xhs-downloader/Volume/Download}/<作品文件夹>"/*.{jpg,jpeg,png,webp} /tmp/bm/xhs_images/ 2>/dev/null
-
-ffmpeg -pattern_type glob -i "/tmp/bm/xhs_images/*" \
-  -filter_complex "scale=360:-1,tile=4x4:padding=8:color=white" \
-  -fps_mode vfr /tmp/bm/xhs_sheet_%03d.jpg -loglevel error
+bash scripts/prepare-assets.sh "<url-or-local-video>"
 ```
 
-输出:
-- `/tmp/bm/xhs_detail.json` — 标题、正文、互动、作者、图片/视频地址等证据
-- `/tmp/bm/xhs_sheet_*.jpg` — 图文视觉脚本 contact sheet
+### 本地视频轻量自检
 
-模型选型(whisper):
-- `medium` — 默认,中文够用,M-series Mac 跑 6 分钟视频 ~3-5 分钟
-- `large-v3` — 重要对标 / 专业术语多 / 口音重时用,慢 3-4 倍
-- `small` 及以下中文不行,**别用**
+```bash
+bash scripts/check-deps.sh --local-video
+```
 
-长视频(>5 分钟)抽帧 `fps=1/5` 减密度;>15 分钟建议先切片再转写,或考虑商业 API(飞书妙记/通义听悟,后续 skill 接)。多张 sheet 都要读,缺哪张视觉证据就缺。
+本地视频不需要 Docker / Douyin API / XHS API;只需要 ffmpeg、ffprobe、openai-whisper。本地文件默认拿不到账号、标题、点赞、评论、发布时间,报告中标「未获取」。
+
+### Whisper 语言策略
+
+- 默认 `WHISPER_LANGUAGE=auto`,不传 `--language`。
+- 已知中文原生口播才可显式:`WHISPER_LANGUAGE=Chinese`。
+- 搬运、AI 译制、TikTok 英文原声、中英混合、语言不确定:必须 auto。
+- 不要根据用户语言或文件所在平台强制设为中文。
+
+回归案例已验证:49 秒英文 Philips OneBlade 视频自动检测为 English 后转写准确;强制 Chinese 会误识别,并在片尾静音段产生幻觉。
+
+### Whisper 模型策略
+
+默认 `WHISPER_MODEL=auto`:
+1. 完整 medium 缓存 → 使用 medium。
+2. 无完整 medium、有完整 small 缓存 → 使用 small,并在 manifest 标记低质量风险。
+3. 都没有 → 默认准备下载 medium。
+
+提前预取:
+
+```bash
+bash scripts/prefetch-model.sh medium      # 常规重要对标
+bash scripts/prefetch-model.sh large-v3    # 专业术语/口音重
+```
+
+预取脚本支持续传 `.part`、SHA256 校验、通过后原子替换。默认自动探测 Clash `127.0.0.1:7897`,显式 `HTTPS_PROXY` 优先。
+
+默认不设置 `--initial_prompt`。只有用户提供可靠术语表且明确音频语言时才设置 `WHISPER_INITIAL_PROMPT`;混合语言或机器译制视频乱加 prompt 可能更差。
+
+### 产物
+
+`prepare-assets.sh` 自动产出:
+
+- `video.mp4` —— 下载或复制的视频。
+- `audio.wav`、`audio.srt`、`audio.txt` —— 音轨、带时间轴字幕、纯文本。
+- `frames/s_*.jpg` —— 统一采样帧,供 contact sheet、OCR 和画面量化使用。
+- `frames/cut_*.jpg`、`cuts.log` —— 场景切点和剪辑节奏。
+- `sheet_*.jpg` —— contact sheet。
+- `ocr_raw.txt`、`ocr.md` —— 屏幕标题、UI、产品名、价格、烧录文字。
+- `visual_metrics.json`、`visual_metrics.md` —— 亮度、饱和度、对比度、主色、画面跳变。
+- `video_stats.txt`、`manifest.txt`。
+
+脚本末尾自动执行证据校验:
+
+```bash
+python3 scripts/verify_evidence.py "<run_dir>"
+```
+
+### 无图片输入时的视觉回退
+
+优先读 `sheet_*.jpg`;如果当前环境不支持图片输入,不要停止,使用:
+
+1. `ocr.md` —— 屏幕文字证据。
+2. `visual_metrics.md` —— 画面风格和节奏的量化证据。
+3. `cuts.log` —— 切点时间、剪辑密度。
+
+OCR 只证明屏幕出现过的文字,不能把 OCR 噪声当口播;无音频则标「无口播」。
+
+### 抽帧密度
+
+| 视频时长 | 采样密度 |
+| --- | --- |
+| <=3 分钟 | 每秒 1 帧 |
+| 3–15 分钟 | 每 3 秒 1 帧 |
+| >15 分钟 | 每 5 秒 1 帧,必要时切片并行转写 |
 
 ---
 

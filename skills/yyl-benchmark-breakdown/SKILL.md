@@ -1,98 +1,181 @@
 ---
 name: yyl-benchmark-breakdown
-description: 拆解对标账号 / 竞品内容——丢一个链接进来,自动识别平台(抖音/小红书/B站/YouTube/公众号)和粒度(单条 or 整个账号),抓取内容后输出三件套:可复用爆款公式、画面+口播逐段拆解、人设与内容定位,并自动存档到 benchmarks/。短视频自动下载 + 转写口播 + 抽视觉帧(contact sheet 多模态读图),不只看 caption。当用户说「拆解这个账号/视频/笔记」「分析对标/竞品」「这条为什么火」「给链接拆内容」「teardown」「看看别人怎么做的」时使用。抓不到内容会引导粘贴文案/字幕,绝不直接报错。
+description: 拆解对标账号 / 竞品内容——丢一个链接或本地视频进来,自动识别平台(抖音/小红书/B站/YouTube/公众号)和粒度(单条 or 整个账号),抓取内容后输出三件套:可复用爆款公式、画面+口播逐段拆解、人设与内容定位,并自动存档到 benchmarks/。短视频自动下载/读取 + 转写口播 + 抽视觉帧(contact sheet);图片输入不可用时自动用 macOS Vision OCR + PIL 画面量化回退。当用户说「拆解这个账号/视频/笔记」「分析对标/竞品」「这条为什么火」「给链接拆内容」「teardown」「看看别人怎么做的」时使用。抓不到内容会引导粘贴文案/字幕,绝不直接报错。
 ---
 
 # YYL 对标账号拆解 Skill
 
-做一件事:**给一个链接,把对方的内容拆到能复用的程度。**
+目标:**给一个链接或本地视频,把内容拆到能直接复用的程度。**
 
-产出固定三件套(见 `references/output-template.md`):
-1. **可复用爆款公式** —— 提炼成能直接套用的选题套路 + 结构模板 + 视觉公式。
-2. **画面 + 口播逐段拆解** —— 时间轴对齐,逐段标注画面/口播/钩子/节奏/转折/CTA + 两者协同方式。
+固定产出三件套(格式见 `references/output-template.md`):
+1. **可复用爆款公式** —— 选题套路、结构模板、视觉公式。
+2. **画面 + 口播逐段拆解** —— 时间轴对齐,标注画面、口播、钩子、节奏、转折、CTA 与协同方式。
 3. **人设与内容定位** —— 人设标签、视觉符号、内容矩阵、差异化打法。
 
-> 这是**分析型** skill,产出 markdown 报告,不产图。要做封面用 `yyl-video-thumbnail`,要做小红书图文用 `yuyile-social-card-skill`。
+> 这是分析型 skill,产出 Markdown,不产图。封面用 `yyl-video-thumbnail`;档案/纸质拼贴风格视频用对应视频创作 skill。
 
-## 工作流(前置清单通过后自动开干)
+## 0. 前置自检:区分 URL 和本地视频
 
-0. **前置清单(每次开工先跑,但不要反复打扰用户)**:
-   - 跑 `bash scripts/check-deps.sh`。
-   - **如果自检失败**:不要开始拆解;先帮用户补环境。按自检输出说明缺什么、为什么需要、下一步命令是什么。
-     - Docker 未安装/未启动 → 说明 Docker 是本地下载 API 的运行环境,引导用户安装并打开 Docker Desktop。
-     - Douyin_TikTok_Download_API 或 XHS-Downloader API 不可达 → Docker 可用时运行 `bash scripts/bootstrap-local-apis.sh`,再重跑 `bash scripts/check-deps.sh`。
-     - ffmpeg / whisper 缺失 → 按 `INSTALL.md` 给出安装命令,装好再重跑自检。
-   - **如果必需依赖全部通过**:不要问用户确认,直接进入第 1 步。
-   - **TikHub 是可选项**:首次 setup 或目标平台需要 TikHub(YouTube/快手/海外平台/本地 API 失败)且没有 `TIKHUB_API_KEY` 时,给用户两个选择:「现在配置」或「先跳过」。跳过后继续处理本地 API 能覆盖的平台;不要因为 TikHub 缺失阻塞抖音/B站/TikTok/小红书单条。
+先判断输入是不是本地文件:
+- 本地文件存在 → 跑:`bash scripts/check-deps.sh --local-video`
+- URL → 跑:`bash scripts/check-deps.sh`
 
-   前置清单:
-   - 必需:Docker、Douyin_TikTok_Download_API、XHS-Downloader API、ffmpeg、openai-whisper。
-   - 可选:TikHub API key、Jina Reader key。
+不要用 URL 的完整依赖清单阻塞本地视频拆解:
 
-1. **识别**:从 URL 判断平台 + 粒度(单条/账号)。规则见 `references/fetch-playbook.md`。
-   - 拿不准粒度就先按单条处理,抓到页面再修正。
+| 输入 | 必需依赖 | 可跳过 |
+| --- | --- | --- |
+| 本地视频 | ffmpeg、ffprobe、openai-whisper、可用 Python;macOS 回退建议有 Swift/PIL | Docker、平台本地 API |
+| 抖音/TikTok/B站 URL | ffmpeg、openai-whisper、Docker、Douyin_TikTok_Download_API | TikHub、Jina |
+| 小红书 URL | ffmpeg、openai-whisper、Docker、XHS-Downloader API | TikHub、Jina |
+| YouTube/快手/海外 URL | ffmpeg、openai-whisper,TikHub 或其他可用抓取方式 | 本地平台 API |
 
-2. **准备证据包(优先跑自动流程)**:
-   - 先跑 `bash scripts/prepare-assets.sh "<url>"`。
-   - 它会自动创建工作目录,保存 `metadata.json`、下载视频/图片、转写 `audio.txt`、抽帧并生成 `sheet_*.jpg` / `xhs_sheet_*.jpg`。
-   - 跑完先读工作目录里的 `manifest.txt`,回显一句「我抓到了什么」(平台/字段/缺什么),再进入拆解。
+自检失败时先补环境,并明确告诉用户缺什么、为什么需要、下一步命令是什么:
+- Docker 未启动:引导启动 Docker Desktop;Colima 用户确认 `docker info` 可用。
+- 本地 API 不可达且 Docker 可用:运行 `bash scripts/bootstrap-local-apis.sh`,再重跑自检。
+- ffmpeg / whisper 缺失:按 `INSTALL.md` 安装。
+- 依赖全部通过后不要反复确认,直接进入证据包准备。
 
-3. **取数回退(自动流程失败时继续走,不要在第一级失败就停)**。细节、端点、命令见 `references/fetch-playbook.md`。
-   - **① 平台本地 API(主力)**:
-     - 抖音 / TikTok / Bilibili → Douyin_TikTok_Download_API:`curl http://localhost:80/api/hybrid/video_data?url=...`
-     - 小红书单条笔记 → XHS-Downloader:`POST ${XHS_API_BASE:-http://127.0.0.1:5556}/xhs/detail`。`download:true` 会下载图文/视频文件到 `${XHS_DOWNLOAD_DIR:-$HOME/.xhs-downloader/Volume/Download}`。
-   - **② TikHub(备用)**:YouTube、快手、海外平台、小红书本地 API 失败时用。需要 `TIKHUB_API_KEY` 环境变量。
-   - **③ Jina Reader**:公众号文章、普通网页、纯图文兜底,`curl https://r.jina.ai/<url>`。
-   - **④ 引导粘贴**:还拿不到 → 让用户发文案/字幕/截图,**不报错**。
+**重要版本约定**:Douyin_TikTok_Download_API 默认使用已验证兼容旧接口的 `evil0ctal/douyin_tiktok_download_api:V4.1.2`;不要默认拉 `latest`,因为新版已改 PostgreSQL/微服务,可能不兼容本 skill 的旧端点。
 
-4. **短视频必做:下载 + 转写口播 + 抽视觉帧**(三样都缺不可)
-   - 抖音 / B站 / TikTok / YouTube 单条 → 用 `download_addr` 下视频 → `ffmpeg` 抽音轨 → `whisper --model medium --language Chinese` 转写 → `ffmpeg` 场景检测 + 节奏采样 + 拼 contact sheet。
-   - 小红书视频笔记 → XHS-Downloader 先下载 mp4 → 复用同一套 `ffmpeg` + `whisper` + contact sheet 流程。
-   - 抽完帧**用 Read 工具把 `/tmp/bm/sheet_*.jpg` 喂给自己看**——多模态读图是视觉拆解的核心证据。
-   - 小红书图文笔记 → 用 XHS-Downloader 下载图片,按图片序号拼 contact sheet,把图序当作"视觉脚本"看;没有口播就明确标「无口播」,不硬编。
-   - 公众号文章 → 跳过下载/转写,但正文和配图都要作为证据。
-   - 命令模板见 `references/fetch-playbook.md` 第 3 节。
+## 1. 识别输入
 
-5. **拆解**:按通用四层 + 视觉七维 + 平台特化分析。
-   - 脚本/结构/选题/转化 → `references/breakdown-framework.md`
-   - 画面层(视觉钩子/景别/切点节奏/字幕/视觉符号/色调/场景调度)→ `references/visual-framework.md`
-   - 单条 → 深拆这一条,**画面与口播必须时间轴对齐**(看协同/互补/错位/预告/强调)。
-   - 账号 → 先抓 5–15 条样本,找**重复出现的规律**(选题、结构、视觉符号、发布、互动),再挑 1–2 条代表作深拆。
+- URL:按 `references/fetch-playbook.md` 判断平台和粒度;拿不准粒度先按单条处理。
+- 本地路径:只要文件存在且 ffmpeg 能读,就作为 `local-file` 视频处理。
+- 本地视频默认拿不到平台账号、标题、点赞、评论、发布时间;这些字段标为「未获取」,不要编造。若用户同时给了来源 URL,再用 URL 流程补元数据。
 
-6. **输出 + 存档**:按 `references/output-template.md` 生成报告,**同时存一份**到
-   `benchmarks/<平台>-<账号名>/<日期>-<标题slug>.md`(目录不存在就建)。
-   存档是第二阶段「长期对标库」的地基,每次都存。
-   - 短视频报告末尾必须附 `## 完整文字转写稿`,逐字粘贴 `audio.txt` 的完整内容;不能只给摘要。
-   - 图文/网页报告末尾必须附完整正文;如果确实无口播,明确写「无口播」。
+## 2. 统一准备证据包
 
-7. **收尾**:交付前检查报告末尾是否已经附完整转写稿/正文,再给「**这条/这个账号最值得我抄的 3 个点**」+ 一句可执行的下一步建议。
+对 URL 和本地视频都运行同一个入口:
+
+```bash
+bash scripts/prepare-assets.sh "<url-or-local-video>"
+```
+
+如需固定产物目录:
+
+```bash
+bash scripts/prepare-assets.sh "<url-or-local-video>" "/tmp/yyl-benchmark/<run-name>"
+```
+
+脚本会自动生成:
+- `metadata.json` / `ffprobe.json` —— 元数据或本地视频技术信息。
+- `video.mp4` —— 下载或复制的视频。
+- `audio.wav`、`audio.srt`、`audio.txt` —— 音轨、带时间轴字幕、纯文本。
+- `frames/s_*.jpg` —— 统一采样帧。
+- `frames/cut_*.jpg`、`cuts.log` —— 场景切点与剪辑节奏证据。
+- `sheet_*.jpg` —— contact sheet。
+- `ocr_raw.txt`、`ocr.md` —— 屏幕文字/OCR 证据。
+- `visual_metrics.json`、`visual_metrics.md` —— 亮度、饱和度、对比度、主色与画面跳变。
+- `video_stats.txt` —— 转写模型、语言、切点等运行信息。
+- `manifest.txt` —— 本次抓到了什么、缺什么、文件清单。
+
+脚本最后会自动运行:
+
+```bash
+python3 scripts/verify_evidence.py "<run_dir>"
+```
+
+若证据校验失败,先修证据包,不要直接写分析结论。
+
+## 3. Whisper 策略:语言自动、模型分级、不要乱加术语 prompt
+
+### 语言
+
+默认 `WHISPER_LANGUAGE=auto`,不传 `--language`,让 Whisper 根据前 30 秒自动检测。
+
+- 已知中文原生视频:可显式 `WHISPER_LANGUAGE=Chinese`。
+- 译制、搬运、TikTok/英文原声、中英混合、语言不确定:必须用 `auto`。
+- 不要因为文件来自中文平台或用户用中文说话,就把视频语言强制设成中文。
+
+本 skill 的回归视频虽然出现在中文环境,但 Whisper 自动检测为 English;强制 Chinese 已验证会把剃须/刀头等内容误识别成发型/鞋子等,并在片尾静音段产生幻觉。
+
+### 模型
+
+默认 `WHISPER_MODEL=auto`,只使用完整缓存:
+1. 完整 `medium` 缓存 → 用 medium。
+2. 没有完整 medium 但有完整 small 缓存 → 用 small,并在 `manifest.txt` 标记低质量风险。
+3. 都没有 → 默认准备下载 medium。
+
+重要中文对标优先提前预取模型:
+
+```bash
+bash scripts/prefetch-model.sh medium      # 平衡速度与准确率
+bash scripts/prefetch-model.sh large-v3    # 专业术语/口音重时再用
+```
+
+### Prompt
+
+- 默认不设置 `--initial_prompt`。
+- 只有用户已提供可靠术语表,且明确知道音频语言时才设置 `WHISPER_INITIAL_PROMPT`。
+- 对 AI 配音、机器译制、混合语言视频,强行塞术语 prompt 可能让结果更差。
+
+转写命令始终带:
+- `--condition_on_previous_text False`:减少错误上下文滚雪球。
+- `--fp16 False`:CPU 环境稳定。
+
+## 4. URL 抓取回退
+
+按顺序尝试,不在第一级失败就停止:
+
+1. **平台本地 API**
+   - 抖音 / TikTok / Bilibili:`Douyin_TikTok_Download_API`。
+   - 小红书:XHS-Downloader API。
+2. **TikHub**:YouTube、快手、海外平台或本地 API 失败时用;需要 `TIKHUB_API_KEY`。
+3. **Jina Reader**:公众号、普通网页、图文长文兜底。
+4. **用户粘贴**:让用户补文案、字幕、截图或录屏;不要只报“失败”。
+
+具体端点和命令见 `references/fetch-playbook.md`。
+
+## 5. 视觉证据:能读图就读,不能读图用回退
+
+优先级:
+1. 如果环境支持图片输入,读取 `sheet_*.jpg` 和必要的关键帧。
+2. 如果图片输入不可用,不要停;读取并使用脚本自动生成的:
+   - `ocr.md` —— 标题、UI、烧录字、产品名、价格等。
+   - `visual_metrics.md` —— 画面亮度、饱和度、对比度、主色和明显跳变。
+   - `cuts.log` —— 切点时间与剪辑密度。
+3. OCR 只能证明屏幕上出现过什么文字,不能把 OCR 噪声当口播。
+4. 无音频视频明确标「无口播」;无字幕/无屏幕文字也不要硬编。
+
+短视频采样密度:
+- `<=3 分钟`:每秒 1 帧。
+- `3–15 分钟`:每 3 秒 1 帧。
+- `>15 分钟`:每 5 秒 1 帧,必要时切片并行转写。
+
+## 6. 拆解与存档
+
+证据包完整后,结合:
+- `references/breakdown-framework.md`
+- `references/visual-framework.md`
+- `references/output-template.md`
+
+输出报告并自动存档到:
+
+```text
+benchmarks/<平台>-<账号名或未知账号>/<日期>-<标题slug>.md
+```
+
+短视频报告末尾必须包含 `## 完整文字转写稿`,完整粘贴 `audio.txt`;图文/网页附完整正文。抓不到的数据写「未获取」,不要编造。
 
 ## 铁律
 
-- **自检通过就自动开干**:不要再问用户要不要开始;必须完成下载 → 转写 → 视觉识别 → 爆款拆解 → 存档。不能只停在证据包准备完成。
-- **永不空手而归**:逐级回退走完;真抓不到就引导粘贴,绝不只甩一句「抓取失败」。
-- **短视频必转写 + 必读图**:caption + 数据不够,**口播 + 画面 contact sheet 两个证据都要**,缺一拆不全。
-- **报告末尾必须附完整转写稿**:短视频必须把 `audio.txt` 完整粘贴到 `## 完整文字转写稿`;图文/网页附完整正文或标注「无口播」。这是交付硬门槛,不能只写摘要、不能漏。
-- **要可复用,不要复述**:别复述对方讲了什么/拍了什么,要提炼**为什么这么做、我怎么套用**。
-- **基于证据**:数据、原句来自实际抓取;抓不到的指标标「未获取」,不要编。
-- **第一性**:每个结论回到「它解决了观众什么问题 / 戳了什么情绪」,不堆术语。
-- **始终存档**到 `benchmarks/`,文件名含平台、账号、日期。
+- **本地视频不被 Docker 阻塞**:本地文件走轻量依赖检查。
+- **语言不确定就自动检测**:不要无脑 `--language Chinese`。
+- **短视频必须同时有口播和画面证据**:caption 和互动数据不能替代。
+- **图片输入不可用也要完成视觉分析**:使用 OCR、PIL 指标和切点日志。
+- **逐级回退,永不空手而归**:真抓不到就引导用户粘贴文案/字幕/截图。
+- **结论必须可复用**:不是复述内容,而是说明为什么有效、怎么套用。
+- **始终存档**:为长期对标库沉淀样本。
 
 ## 文件
 
-- `INSTALL.md` —— 依赖安装指南(给人看)+ 常见问题。
-- `scripts/check-deps.sh` —— 一键自检前置依赖,缺什么给装的命令。
-- `scripts/bootstrap-local-apis.sh` —— 一键拉起本地 Douyin / XHS 下载 API;Docker 缺失时给安装引导。
-- `scripts/prepare-assets.sh` —— 自动证据包流程:下载 → 转写 → 抽帧/拼图 → 生成 manifest。
-- `references/fetch-playbook.md` —— ★开工先读:平台/粒度识别表、四级取数回退、下载+转写+抽帧命令、粘贴引导话术。
-- `references/breakdown-framework.md` —— 通用四层拆解 + 各平台特化(脚本/结构层) + 爆款公式提炼法。
-- `references/visual-framework.md` —— ★短视频必读:画面七维拆解 + 视觉/口播时间轴对齐 + 视觉公式提炼法。
-- `references/output-template.md` —— 三件套交付模板(已含画面+口播对齐表) + 存档命名约定。
-
-## 第二阶段(暂未实现,已留地基)
-
-- **长期对标账号库**:基于 `benchmarks/` 里沉淀的多份拆解,做跨账号/跨时间的规律汇总(谁的哪类选题稳定爆、行业共性、可追踪趋势)。
-- **长视频转写优化**:>15 分钟视频自动切片 + 并行转写;或接商业 API(飞书妙记/通义听悟)。
-- **小红书账号级自动化**:接 MediaCrawler 自托管,用于账号主页采样、评论与搜索;单条下载已经由 XHS-Downloader 覆盖。
-
-等单链接拆解打磨稳了再做。
+- `INSTALL.md` —— 依赖安装与常见问题。
+- `scripts/check-deps.sh` —— URL/本地视频依赖自检。
+- `scripts/bootstrap-local-apis.sh` —— 启动本地下载 API;Douyin API 固定 V4.1.2。
+- `scripts/prepare-assets.sh` —— 统一证据包流程。
+- `scripts/prefetch-model.sh` —— 预取 Whisper 模型。
+- `scripts/verify_evidence.py` / `verify-evidence.sh` —— 校验证据包完整性。
+- `scripts/ocr.swift` —— macOS Vision OCR 源码。
+- `scripts/build_ocr_report.py` —— OCR 原始结果整理。
+- `scripts/analyze_frames.py` —— PIL 画面量化。
+- `references/*.md` —— 取数、拆解、视觉和输出模板。

@@ -45,15 +45,21 @@ bash ~/.claude/skills/yyl-benchmark-breakdown/scripts/bootstrap-local-apis.sh
 # 4) 再自检;通过后就可以拆
 bash ~/.claude/skills/yyl-benchmark-breakdown/scripts/check-deps.sh
 
-# 5) 在 Claude Code 里说:「拆解这条:<链接>」
+# 5) URL 或本地视频都可以说:「拆解这条:<链接/本地视频路径>」
 ```
 
 如果 Docker / ffmpeg / whisper 缺失,按 [INSTALL.md](INSTALL.md) 先补齐。TikHub 是可选项;需要拆 YouTube、快手、海外平台或想要备用 API 时再配置。
 
+## 预取 Whisper 模型
+
+```bash
+bash scripts/prefetch-model.sh medium       # 重要中文对标推荐
+```
+
 ## 一键准备证据包
 
 ```bash
-bash scripts/prepare-assets.sh "<链接>"
+bash scripts/prepare-assets.sh "<链接或本地视频>"
 ```
 
 这个脚本会完成机械流程:识别平台 → 调本地 API → 下载视频/图片 → 视频转写 → 抽帧/拼 contact sheet → 生成 `manifest.txt`。Claude 再基于证据包做判断和拆解。

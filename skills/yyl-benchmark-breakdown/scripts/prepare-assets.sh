@@ -7,7 +7,11 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  bash scripts/prepare-assets.sh "<url>" [output_dir]
+  bash scripts/prepare-assets.sh "<url-or-local-video>" [output_dir]
+
+Examples:
+  bash scripts/prepare-assets.sh "https://www.douyin.com/video/..."
+  bash scripts/prepare-assets.sh "./data/7686799477084015905.mp4"
 
 Environment:
   DOUYIN_API_BASE       Default: http://localhost:80
@@ -15,8 +19,10 @@ Environment:
   XHS_CONTAINER_NAME    Default: xhs-downloader-api
   XHS_DOWNLOAD_DIR      Default: inferred from Docker mount, then $HOME/.xhs-downloader/Volume/Download
   BENCHMARK_WORKDIR     Default: /tmp/yyl-benchmark
-  WHISPER_MODEL         Default: medium
-  WHISPER_LANGUAGE      Default: Chinese
+  WHISPER_BIN           Default: whisper on PATH, then $HOME/.whisper-venv/bin/whisper
+  WHISPER_MODEL         Default: auto (use complete cached medium, otherwise complete cached small, otherwise medium)
+  WHISPER_LANGUAGE      Default: auto (omit Whisper language flag; use Chinese only for known Chinese originals)
+  WHISPER_INITIAL_PROMPT Optional; empty by default. Do not force terminology prompts.
 EOF
 }
 
@@ -25,6 +31,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || $# -lt 1 ]]; then
   exit 0
 fi
 
+INPUT="$1"
 URL="$1"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 WORK_ROOT="${BENCHMARK_WORKDIR:-/tmp/yyl-benchmark}"
@@ -32,8 +39,9 @@ RUN_DIR="${2:-$WORK_ROOT/$RUN_ID}"
 DOUYIN_API_BASE="${DOUYIN_API_BASE:-http://localhost:80}"
 XHS_API_BASE="${XHS_API_BASE:-http://127.0.0.1:5556}"
 XHS_CONTAINER_NAME="${XHS_CONTAINER_NAME:-xhs-downloader-api}"
-WHISPER_MODEL="${WHISPER_MODEL:-medium}"
-WHISPER_LANGUAGE="${WHISPER_LANGUAGE:-Chinese}"
+WHISPER_MODEL="${WHISPER_MODEL:-auto}"
+WHISPER_LANGUAGE="${WHISPER_LANGUAGE:-auto}"
+WHISPER_INITIAL_PROMPT="${WHISPER_INITIAL_PROMPT:-}"
 
 infer_xhs_download_dir() {
   if [[ -n "${XHS_DOWNLOAD_DIR:-}" ]]; then
@@ -187,41 +195,217 @@ download_video_from_url() {
   curl -L -A "Mozilla/5.0" -H "Referer: $referer" "$video_url" -o "$RUN_DIR/video.mp4"
 }
 
+select_python_with_pil() {
+  if python3 -c 'import PIL' >/dev/null 2>&1; then
+    command -v python3
+  elif [[ -x /usr/bin/python3 ]] && /usr/bin/python3 -c 'import PIL' >/dev/null 2>&1; then
+    echo /usr/bin/python3
+  else
+    echo ""
+  fi
+}
+
+PYTHON_WITH_PIL="$(select_python_with_pil)"
+
+select_whisper_bin() {
+  if [[ -n "${WHISPER_BIN:-}" && -x "$WHISPER_BIN" ]]; then
+    printf '%s\n' "$WHISPER_BIN"
+  elif command -v whisper >/dev/null 2>&1; then
+    command -v whisper
+  elif [[ -x "$HOME/.whisper-venv/bin/whisper" ]]; then
+    printf '%s\n' "$HOME/.whisper-venv/bin/whisper"
+  fi
+}
+
+WHISPER_BIN_RESOLVED="$(select_whisper_bin || true)"
+
+model_is_cached() {
+  local model="$1"
+  local file="$HOME/.cache/whisper/$model.pt"
+  [[ -f "$file" ]] || return 1
+  local size
+  size="$(stat -f%z "$file" 2>/dev/null || echo 0)"
+  case "$model" in
+    medium) [[ "$size" -gt 1000000000 ]] ;;
+    small) [[ "$size" -gt 300000000 ]] ;;
+    *) [[ "$size" -gt 1000000 ]] ;;
+  esac
+}
+
+resolve_whisper_model() {
+  if [[ "$WHISPER_MODEL" != "auto" ]]; then
+    printf '%s\n' "$WHISPER_MODEL"
+  elif model_is_cached medium; then
+    printf 'medium\n'
+  elif model_is_cached small; then
+    printf 'small\n'
+  else
+    printf 'medium\n'
+  fi
+}
+
+WHISPER_MODEL_RESOLVED="$(resolve_whisper_model)"
+
+srt_to_plain_text() {
+  local srt="$1" txt="$2"
+  python3 - "$srt" "$txt" <<'PY'
+import re, sys
+from pathlib import Path
+src, dst = map(Path, sys.argv[1:])
+lines = []
+for raw in src.read_text(encoding='utf-8', errors='ignore').splitlines():
+    line = raw.strip()
+    if not line or line.isdigit():
+        continue
+    if re.match(r"\d{2}:\d{2}:\d{2}[,.]\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}[,.]\d{3}", line):
+        continue
+    lines.append(line)
+dst.write_text('\n'.join(lines).strip() + ('\n' if lines else ''), encoding='utf-8')
+PY
+}
+
+transcribe_audio() {
+  if [[ -s "$RUN_DIR/audio.txt" ]]; then
+    log "transcript: $RUN_DIR/audio.txt (reused)"
+    return 0
+  fi
+
+  if [[ -z "$WHISPER_BIN_RESOLVED" ]]; then
+    log "warning: whisper executable not found; audio transcript skipped"
+    log "hint: install with INSTALL.md or set WHISPER_BIN to the whisper executable"
+    return 0
+  fi
+
+  log "transcribing with: $WHISPER_BIN_RESOLVED model=$WHISPER_MODEL_RESOLVED language=$WHISPER_LANGUAGE"
+  local -a whisper_args
+  whisper_args=(
+    "$RUN_DIR/audio.wav"
+    --model "$WHISPER_MODEL_RESOLVED"
+    --output_dir "$RUN_DIR"
+    --output_format srt
+    --task transcribe
+    --fp16 False
+    --condition_on_previous_text False
+  )
+  if [[ "$WHISPER_LANGUAGE" != "auto" && -n "$WHISPER_LANGUAGE" ]]; then
+    whisper_args+=(--language "$WHISPER_LANGUAGE")
+  fi
+  if [[ -n "$WHISPER_INITIAL_PROMPT" ]]; then
+    whisper_args+=(--initial_prompt "$WHISPER_INITIAL_PROMPT")
+  fi
+  "$WHISPER_BIN_RESOLVED" "${whisper_args[@]}"
+
+  if [[ -f "$RUN_DIR/audio.srt" ]]; then
+    srt_to_plain_text "$RUN_DIR/audio.srt" "$RUN_DIR/audio.txt"
+  fi
+  if [[ "$WHISPER_MODEL_RESOLVED" == "small" || "$WHISPER_MODEL_RESOLVED" == "base" || "$WHISPER_MODEL_RESOLVED" == "tiny" ]]; then
+    log "quality warning: $WHISPER_MODEL_RESOLVED is a fallback model; resolve terminology using ocr.md/burned-in subtitles"
+  fi
+  if [[ -z "$WHISPER_INITIAL_PROMPT" ]]; then
+    log "transcript note: no forced initial prompt (safer for AI-dubbed/translated videos)"
+  fi
+}
+
+ensure_vision_ocr() {
+  local cache_dir="$HOME/.cache/yyl-benchmark"
+  local binary="$cache_dir/vision-ocr"
+  mkdir -p "$cache_dir"
+  if [[ -x "$binary" ]]; then
+    printf '%s\n' "$binary"
+  elif [[ "$(uname -s)" == "Darwin" ]] && command -v swiftc >/dev/null 2>&1; then
+    if swiftc "$SCRIPT_DIR/ocr.swift" -o "$binary" >/dev/null 2>&1; then
+      printf '%s\n' "$binary"
+    else
+      return 1
+    fi
+  else
+    return 1
+  fi
+}
+
+run_visual_ocr() {
+  local ocr_bin raw_ocr="$RUN_DIR/ocr_raw.txt" ocr_md="$RUN_DIR/ocr.md"
+  OCR_IMAGES=()
+  while IFS= read -r file; do
+    OCR_IMAGES+=("$file")
+  done < <(find "$RUN_DIR/frames" -maxdepth 1 -type f -name 's_*.jpg' | sort)
+  [[ ${#OCR_IMAGES[@]} -gt 0 ]] || return 0
+
+  if ocr_bin="$(ensure_vision_ocr)"; then
+    "$ocr_bin" "${OCR_IMAGES[@]}" > "$raw_ocr" || true
+    python3 "$SCRIPT_DIR/build_ocr_report.py" "$raw_ocr" "$ocr_md"
+    if [[ -s "$ocr_md" ]]; then
+      log "visual OCR: $ocr_md"
+    else
+      log "warning: Vision OCR produced no text"
+    fi
+  else
+    log "warning: macOS Vision OCR unavailable; burned-in subtitles were not extracted"
+  fi
+}
+
+run_visual_metrics() {
+  if [[ -z "$PYTHON_WITH_PIL" ]]; then
+    log "warning: Python PIL unavailable; visual metrics skipped"
+    return 0
+  fi
+  "$PYTHON_WITH_PIL" "$SCRIPT_DIR/analyze_frames.py" \
+    "$RUN_DIR/frames" "$RUN_DIR/visual_metrics.json" "$RUN_DIR/visual_metrics.md"
+  log "visual metrics: $RUN_DIR/visual_metrics.md"
+}
+
 prepare_video_assets() {
   [[ -f "$RUN_DIR/video.mp4" ]] || return 0
 
   log "video: $RUN_DIR/video.mp4"
-  ffmpeg -y -i "$RUN_DIR/video.mp4" -vn -ac 1 -ar 16000 -c:a pcm_s16le "$RUN_DIR/audio.wav" -loglevel error || true
-
-  if [[ -s "$RUN_DIR/audio.txt" ]]; then
-    log "transcript: $RUN_DIR/audio.txt"
-  elif [[ -s "$RUN_DIR/audio.wav" ]]; then
-    if command -v whisper >/dev/null 2>&1; then
-      whisper "$RUN_DIR/audio.wav" --model "$WHISPER_MODEL" --language "$WHISPER_LANGUAGE" \
-        --output_dir "$RUN_DIR" --output_format txt --task transcribe
-    else
-      log "warning: whisper not found; transcript skipped"
-    fi
+  duration="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$RUN_DIR/video.mp4" 2>/dev/null || echo 0)"
+  if ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 "$RUN_DIR/video.mp4" | grep -q .; then
+    ffmpeg -y -i "$RUN_DIR/video.mp4" -vn -ac 1 -ar 16000 -c:a pcm_s16le "$RUN_DIR/audio.wav" -loglevel error
+    transcribe_audio
+  else
+    log "warning: no audio stream found"
   fi
 
+  rm -f "$RUN_DIR"/frames/*.jpg
   ffmpeg -i "$RUN_DIR/video.mp4" -vf "select='gt(scene,0.3)',showinfo" \
     -fps_mode vfr "$RUN_DIR/frames/cut_%03d.jpg" 2>"$RUN_DIR/cuts.log" || true
   ffmpeg -i "$RUN_DIR/video.mp4" -t 3 -vf "fps=1" \
     -fps_mode vfr "$RUN_DIR/frames/hook_%03d.jpg" -loglevel error || true
-  ffmpeg -i "$RUN_DIR/video.mp4" -vf "fps=1/3" \
-    -fps_mode vfr "$RUN_DIR/frames/t_%03d.jpg" -loglevel error || true
 
-  if find "$RUN_DIR/frames" -type f -name '*.jpg' | grep -q .; then
-    ffmpeg -pattern_type glob -i "$RUN_DIR/frames/*.jpg" \
+  # Sampling density: 1 fps for <=3m, 1 frame/3s for <=15m, then 1 frame/5s.
+  sample_fps=1
+  if awk -v d="$duration" 'BEGIN { exit !(d > 180 && d <= 900) }'; then
+    sample_fps='1/3'
+  elif awk -v d="$duration" 'BEGIN { exit !(d > 900) }'; then
+    sample_fps='1/5'
+  fi
+  log "sampling frames: fps=$sample_fps"
+  ffmpeg -i "$RUN_DIR/video.mp4" -vf "fps=$sample_fps" \
+    -fps_mode vfr "$RUN_DIR/frames/s_%03d.jpg" -loglevel error || true
+
+  if find "$RUN_DIR/frames" -type f -name 's_*.jpg' | grep -q .; then
+    ffmpeg -pattern_type glob -i "$RUN_DIR/frames/s_*.jpg" \
       -filter_complex "scale=320:-1,tile=6x6:padding=4:color=white" \
       -fps_mode vfr "$RUN_DIR/sheet_%03d.jpg" -loglevel error || true
   fi
 
+  run_visual_ocr
+  run_visual_metrics
+
   local duration cuts avg
   duration="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$RUN_DIR/video.mp4" 2>/dev/null || echo 0)"
   cuts="$(grep -c "pts_time" "$RUN_DIR/cuts.log" 2>/dev/null || echo 0)"
-  avg="$(awk -v d="$duration" -v c="$cuts" 'BEGIN { if (c > 0) printf "%.2f", d/c; else printf "未检测到切点" }')"
-  printf 'duration=%s\ncuts=%s\navg_cut=%s\n' "$duration" "$cuts" "$avg" > "$RUN_DIR/video_stats.txt"
+  avg="$(awk -v d="$duration" -v c="$cuts" 'BEGIN { if (c > 0) printf "%.2f", d/c; else printf "N/A" }')"
+  cat > "$RUN_DIR/video_stats.txt" <<EOF
+duration=$duration
+cuts=$cuts
+avg_cut=$avg
+whisper_bin=$WHISPER_BIN_RESOLVED
+whisper_model=$WHISPER_MODEL_RESOLVED
+whisper_language=$WHISPER_LANGUAGE
+ocr_evidence=$([[ -s "$RUN_DIR/ocr.md" ]] && echo yes || echo no)
+visual_metrics=$([[ -s "$RUN_DIR/visual_metrics.md" ]] && echo yes || echo no)
+EOF
 }
 
 prepare_image_sheet() {
@@ -474,68 +658,107 @@ prepare_xhs_detail_retry() {
   download_xhs_assets_from_json "$detail"
 }
 
-PLATFORM="$(detect_platform)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ -f "$INPUT" ]]; then
+  PLATFORM="local-file"
+  ABS_VIDEO="$(cd "$(dirname "$INPUT")" && pwd)/$(basename "$INPUT")"
+else
+  PLATFORM="$(detect_platform)"
+fi
+
 : > "$MANIFEST"
-printf '%s\n' "$URL" > "$RUN_DIR/source.url"
+printf '%s\n' "$INPUT" > "$RUN_DIR/source.url"
 log "run_dir: $RUN_DIR"
 log "platform: $PLATFORM"
+log "input: $INPUT"
 
-case "$PLATFORM" in
-  xhs)
-    marker="$RUN_DIR/download.marker"
-    : > "$marker"
-    curl -sS -X POST "$XHS_API_BASE/xhs/detail" \
-      -H "Content-Type: application/json" \
-      -d "$(json_payload false)" \
-      -o "$METADATA"
-    if json_has_data "$METADATA"; then
-      download_xhs_assets_from_json "$METADATA"
-      prepare_xhs_web_fallback false
-    else
-      warn_xhs_cookie_if_needed
-      log "warning: XHS API detail-only returned no data; retrying download=true mode"
+if [[ "$PLATFORM" == "local-file" ]]; then
+  cp "$ABS_VIDEO" "$RUN_DIR/video.mp4"
+  ffprobe -v quiet -print_format json -show_format -show_streams "$ABS_VIDEO" > "$RUN_DIR/ffprobe.json"
+  python3 - "$RUN_DIR/ffprobe.json" "$METADATA" "$ABS_VIDEO" <<'PY'
+import json, sys
+from pathlib import Path
+probe = json.load(open(sys.argv[1], encoding='utf-8'))
+source = Path(sys.argv[3])
+fmt = probe.get('format', {})
+streams = probe.get('streams', [])
+video = next((x for x in streams if x.get('codec_type') == 'video'), {})
+audio = next((x for x in streams if x.get('codec_type') == 'audio'), {})
+meta = {
+    'platform': 'local-file',
+    'type': 'video',
+    'source_file': str(source),
+    'file_name': source.name,
+    'duration': float(fmt.get('duration') or 0),
+    'size_bytes': int(fmt.get('size') or source.stat().st_size),
+    'width': int(video.get('width') or 0),
+    'height': int(video.get('height') or 0),
+    'video_codec': video.get('codec_name'),
+    'audio_codec': audio.get('codec_name'),
+    'message': 'Local file input; platform metadata unavailable unless a source URL is provided.',
+}
+json.dump(meta, open(sys.argv[2], 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
+PY
+else
+  URL="$INPUT"
+  case "$PLATFORM" in
+    xhs)
+      marker="$RUN_DIR/download.marker"
+      : > "$marker"
       curl -sS -X POST "$XHS_API_BASE/xhs/detail" \
         -H "Content-Type: application/json" \
-        -d "$(json_payload true)" \
+        -d "$(json_payload false)" \
         -o "$METADATA"
-      copy_new_xhs_files "$marker"
-      if ! json_has_data "$METADATA"; then
-        log "warning: XHS API download=true returned no data; trying web HTML fallback for metadata/subtitles"
-        prepare_xhs_web_fallback
-      elif json_has_data "$METADATA"; then
-        if [[ ! -f "$RUN_DIR/video.mp4" ]] && ! find "$RUN_DIR/xhs_images" -type f | grep -q .; then
-          download_xhs_assets_from_json "$METADATA"
-        fi
+      if json_has_data "$METADATA"; then
+        download_xhs_assets_from_json "$METADATA"
         prepare_xhs_web_fallback false
+      else
+        warn_xhs_cookie_if_needed
+        log "warning: XHS API detail-only returned no data; retrying download=true mode"
+        curl -sS -X POST "$XHS_API_BASE/xhs/detail" \
+          -H "Content-Type: application/json" \
+          -d "$(json_payload true)" \
+          -o "$METADATA"
+        copy_new_xhs_files "$marker"
+        if ! json_has_data "$METADATA"; then
+          log "warning: XHS API download=true returned no data; trying web HTML fallback"
+          prepare_xhs_web_fallback
+        elif [[ ! -f "$RUN_DIR/video.mp4" ]] && ! find "$RUN_DIR/xhs_images" -type f | grep -q .; then
+          download_xhs_assets_from_json "$METADATA"
+          prepare_xhs_web_fallback false
+        else
+          prepare_xhs_web_fallback false
+        fi
       fi
-    fi
-    ;;
-  douyin|tiktok|bilibili)
-    encoded_url="$(python3 - "$URL" <<'PY'
+      ;;
+    douyin|tiktok|bilibili)
+      encoded_url="$(python3 - "$URL" <<'PY'
 from urllib.parse import quote
 import sys
 print(quote(sys.argv[1], safe=""))
 PY
 )"
-    curl -sS "$DOUYIN_API_BASE/api/hybrid/video_data?url=$encoded_url&minimal=false" -o "$METADATA"
-    if video_url="$(extract_video_url)"; then
-      case "$PLATFORM" in
-        douyin) referer="https://www.douyin.com/" ;;
-        tiktok) referer="https://www.tiktok.com/" ;;
-        bilibili) referer="https://www.bilibili.com/" ;;
-      esac
-      download_video_from_url "$video_url" "$referer"
-    else
-      log "warning: no video url found in metadata"
-    fi
-    ;;
-  *)
-    log "warning: platform not automated by this script; use TikHub/Jina/browser fallback from fetch-playbook"
-    printf '{"url": %s, "platform": %s, "message": "manual fallback required"}\n' \
-      "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$URL")" \
-      "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$PLATFORM")" > "$METADATA"
-    ;;
-esac
+      curl -sS "$DOUYIN_API_BASE/api/hybrid/video_data?url=$encoded_url&minimal=false" -o "$METADATA"
+      if video_url="$(extract_video_url)"; then
+        case "$PLATFORM" in
+          douyin) referer="https://www.douyin.com/" ;;
+          tiktok) referer="https://www.tiktok.com/" ;;
+          bilibili) referer="https://www.bilibili.com/" ;;
+        esac
+        download_video_from_url "$video_url" "$referer"
+      else
+        log "warning: no video url found in metadata"
+      fi
+      ;;
+    *)
+      log "warning: platform not automated by this script; use TikHub/Jina/browser fallback"
+      printf '{"url": %s, "platform": %s, "message": "manual fallback required"}\n' \
+        "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$URL")" \
+        "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$PLATFORM")" > "$METADATA"
+      ;;
+  esac
+fi
 
 prepare_video_assets
 prepare_image_sheet
@@ -546,4 +769,6 @@ prepare_image_sheet
   find "$RUN_DIR" -maxdepth 2 -type f | sort
 } >> "$MANIFEST"
 
+log "verifying evidence package"
+python3 "$SCRIPT_DIR/verify_evidence.py" "$RUN_DIR"
 log "done: $RUN_DIR"

@@ -4,42 +4,33 @@
 
 ---
 
-## 0. 抽帧 + Contact Sheet(动手前先有素材)
+## 0. 抽帧 + Contact Sheet + 无图片输入回退
 
-详见 `fetch-playbook.md` 第 3 节(命令模板的权威版本)。简化要点:
+统一入口会自动完成抽帧、contact sheet、OCR 和画面量化:
 
 ```bash
-mkdir -p /tmp/bm/frames
-
-# a) 场景检测找切点(阈值 0.3 一般合适,慢节奏可降到 0.2)
-ffmpeg -i /tmp/bm/video.mp4 -vf "select='gt(scene,0.3)',showinfo" \
-  -fps_mode vfr /tmp/bm/frames/cut_%03d.jpg 2>/tmp/bm/cuts.log
-
-# b) 前 3 秒每秒一帧(锁住钩子)
-ffmpeg -i /tmp/bm/video.mp4 -t 3 -vf "fps=1" -fps_mode vfr /tmp/bm/frames/hook_%03d.jpg -loglevel error
-
-# c) 整体节奏补抽(每 3 秒一帧,<60s 短视频改 fps=1/2)
-ffmpeg -i /tmp/bm/video.mp4 -vf "fps=1/3" -fps_mode vfr /tmp/bm/frames/t_%03d.jpg -loglevel error
-
-# d) 拼 sheet(6x6=36 张/页,超过自动分多张)
-ffmpeg -pattern_type glob -i "/tmp/bm/frames/*.jpg" \
-  -filter_complex "scale=320:-1,tile=6x6:padding=4:color=white" \
-  -fps_mode vfr /tmp/bm/sheet_%03d.jpg -loglevel error
-
-# e) 剪辑节奏数字
-TOTAL_CUTS=$(grep -c "pts_time" /tmp/bm/cuts.log)
-DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 /tmp/bm/video.mp4)
-awk -v d="$DURATION" -v c="$TOTAL_CUTS" 'BEGIN { printf "切点 %d / 时长 %.1fs / 平均 %.2fs 一切\n", c, d, d/c }'
+bash scripts/prepare-assets.sh "<url-or-local-video>"
 ```
 
-产出:
-- `/tmp/bm/sheet_*.jpg` —— **逐张 Read,多模态读图**(可能多张,都要读)
-- `/tmp/bm/cuts.log` —— 切点时间戳(算剪辑节奏 / 对齐口播段落)
-- `/tmp/bm/frames/cut_*.jpg`、`hook_*.jpg` —— 需要细看某帧时单独 Read
+采样规则:
 
-**长视频(>5 分钟)**:把 `fps=1/3` 改成 `fps=1/5` 或 `fps=1/10` 降密度,sheet 会自动分多张。
+| 时长 | 采样帧 |
+| --- | --- |
+| <=3 分钟 | 每秒 1 帧,文件为 `frames/s_*.jpg` |
+| 3–15 分钟 | 每 3 秒 1 帧 |
+| >15 分钟 | 每 5 秒 1 帧 |
 
----
+同时执行场景切点检测,生成 `frames/cut_*.jpg` 与 `cuts.log`,用于判断剪辑密度。`sheet_*.jpg` 只使用统一的 `s_*.jpg` 生成,避免多套帧造成重复证据。
+
+### 读图优先级
+
+1. 环境支持图片输入时,读取 `sheet_*.jpg`;必要时再看单帧。
+2. 图片输入不可用时,使用脚本自动生成的文本证据:
+   - `ocr.md`:标题、UI、产品名、价格、烧录字。
+   - `visual_metrics.md`:亮度、饱和度、对比度、主色和明显跳变。
+   - `cuts.log`:切点时间与剪辑节奏。
+
+OCR 不能替代口播;它只证明屏幕上出现的文字。没有音频时标「无口播」,不要硬编。
 
 ## 1. 七个视觉拆解维度
 

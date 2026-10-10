@@ -2,7 +2,9 @@
 
 这个 skill 依赖几个外部服务和工具。**必需的不装拆解跑不起来,可选的没有也能用主流程。**
 
-> **快速自检**:克隆下来先跑 `bash scripts/check-deps.sh`,看缺什么。必需依赖没过时,不要开始拆解。
+> **快速自检**:URL 输入跑 `bash scripts/check-deps.sh`;本地视频跑 `bash scripts/check-deps.sh --local-video`,看缺什么。必需依赖没过时,不要开始拆解。
+
+**本地视频不需要 Docker/平台 API**;只需要 ffmpeg、ffprobe、openai-whisper。macOS 下建议保留 Swift 与 Python PIL,用于图片输入不可用时的 Vision OCR 和画面量化。
 
 ---
 
@@ -10,9 +12,9 @@
 
 | 依赖 | 必需? | 用途 | 大小/费用 |
 |---|---|---|---|
-| Docker | **必需** | 运行本地 Douyin / XHS 下载 API | Docker Desktop,免费 |
-| Douyin_TikTok_Download_API(本地) | **必需** | 主力取数:抖音 / TikTok / Bilibili 元数据 + 下载地址 | Docker 镜像 ~500MB,免费 |
-| XHS-Downloader API(本地) | **必需** | 主力取数:小红书图文/视频笔记详情 + 文件下载 | Docker/本地服务,免费 |
+| Docker | URL 拆解必需;本地视频可选 | 运行本地 Douyin / XHS 下载 API | Docker Desktop/Colima,免费 |
+| Douyin_TikTok_Download_API(本地) | URL 拆解必需 | 主力取数:抖音 / TikTok / Bilibili 元数据 + 下载地址;固定 V4.1.2 | Docker 镜像 ~500MB,免费 |
+| XHS-Downloader API(本地) | 小红书 URL 必需 | 主力取数:小红书图文/视频笔记详情 + 文件下载 | Docker/本地服务,免费 |
 | ffmpeg | **必需** | 从视频抽音轨 | ~100MB,免费 |
 | openai-whisper | **必需** | 把音轨转写成文字(脚本拆解的核心) | 命令行 ~50MB + 首跑下载 medium 模型 ~1.5GB,免费 |
 | TikHub | **可选** | YouTube / 海外平台 / 小红书备用 API | 注册免费,部分端点付费,小红书全系付费 |
@@ -22,16 +24,38 @@
 
 ## 0. 前置清单与一键启动
 
+
 ### 先跑自检
 
 ```bash
+# URL 输入
 bash scripts/check-deps.sh
+
+# 本地视频输入
+bash scripts/check-deps.sh --local-video
 ```
 
 自检通过才进入拆解。缺项时按输出处理:
 - Docker 未安装/未启动:先安装并打开 Docker Desktop。
 - 本地 Douyin / XHS API 不可达:运行 `bash scripts/bootstrap-local-apis.sh`。
 - ffmpeg / whisper 缺失:按本文第 3 节安装。
+
+### 提前预取 Whisper 模型(推荐)
+
+重要中文对标可以先下载模型,避免正式拆解时等待或留下损坏缓存:
+
+```bash
+bash scripts/prefetch-model.sh medium      # 默认推荐
+bash scripts/prefetch-model.sh large-v3    # 术语/口音复杂时
+```
+
+脚本会执行:断点续传下载到 `.part` → SHA256 校验 → 通过后替换为正式模型文件。默认自动探测 Clash `127.0.0.1:7897`;显式设置的 `HTTPS_PROXY` 优先。
+
+准备证据包后可校验产物完整性:
+
+```bash
+bash scripts/verify-evidence.sh /tmp/yyl-benchmark/<run-dir>
+```
 
 ### 一键拉起本地下载 API
 
@@ -74,8 +98,8 @@ tikhub user info
 先装 Docker Desktop:https://www.docker.com/products/docker-desktop/
 
 ```bash
-docker pull evil0ctal/douyin_tiktok_download_api:latest
-docker run -d --name douyin_tiktok_api -p 80:80 evil0ctal/douyin_tiktok_download_api
+docker pull evil0ctal/douyin_tiktok_download_api:V4.1.2
+docker run -d --name douyin_tiktok_api -p 80:80 evil0ctal/douyin_tiktok_download_api:V4.1.2
 docker ps                                       # 看到容器在跑
 open http://localhost:80/docs                   # 看 API 文档
 ```
@@ -254,7 +278,13 @@ bash scripts/check-deps.sh
 A: 看本文 §1 的「Cookie 风控」,去更新 config.yaml 里的 Douyin Cookie。
 
 **Q: whisper 太慢?**
-A: 短视频(<3 min)用 `medium` 够。M 系 Mac 长视频换 `mlx-whisper` 或 `whisper.cpp`。Linux + NVIDIA 显卡用 `--device cuda`。
+A: 快速回归可使用完整 small 缓存,但重要中文对标建议先 `bash scripts/prefetch-model.sh medium`。M 系 Mac 长视频换 `mlx-whisper` 或 `whisper.cpp`。Linux + NVIDIA 显卡用 `--device cuda`。
+
+**Q: 为什么不默认 `--language Chinese`?**
+A: 只有已知中文原生口播适合强制中文。搬运、译制、TikTok 英文原声、中英混合视频默认 auto;强制中文可能误识别并在静音段产生幻觉。
+
+**Q: `medium.pt` 只有几十 MB 且加载失败?**
+A: 是网络中断留下的残缺文件。运行 `bash scripts/prefetch-model.sh medium`,脚本会把坏文件移走并续传完整模型。
 
 **Q: 不想装 Docker 部署本地 API?**
 A: 项目也支持 pip 模式(`pip install douyin-tiktok-scraper` 作为库),或 Linux 一键部署脚本,具体看[官方 README](https://github.com/Evil0ctal/Douyin_TikTok_Download_API)。
