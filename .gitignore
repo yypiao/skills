@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 video.mp4
+
+# Local video analysis skill backups
+skills/.video-script-analysic-backups/
