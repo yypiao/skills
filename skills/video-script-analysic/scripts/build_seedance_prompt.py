@@ -991,6 +991,19 @@ def render(args) -> tuple[str, dict]:
     product_name = args.product_name or product.get("name") or "[用户商品名]"
     product_image = args.product_image or product.get("image") or "[上传并绑定用户商品参考图]"
     product_notes = args.product_notes or product.get("notes") or "商品外观、颜色、形状、材质、按键、接口、数量、配件、包装和可见 logo 均以用户商品参考图为准。"
+    selling_points = [str(x).strip() for x in product.get("selling_points", []) if str(x).strip()][:3] if isinstance(product.get("selling_points"), list) else []
+    product_brief = {
+        "use_scene": str(product.get("use_scene") or "").strip(),
+        "target_audience": str(product.get("target_audience") or "").strip(),
+        "price_offer": str(product.get("price_offer") or "").strip(),
+        "cta": str(product.get("cta") or "").strip(),
+        "banned_words": str(product.get("banned_words") or "").strip(),
+    }
+    pref_voice = str(observations.get("global", {}).get("voice_language") or "follow").strip().lower()
+    pref_ratio = str(observations.get("global", {}).get("aspect_ratio") or "follow").strip()
+    pref_strength = str(observations.get("global", {}).get("remix_strength") or "strong").strip().lower()
+    if pref_ratio in {"9:16", "1:1", "16:9"}:
+        ratio = pref_ratio
     source = meta.get("source_file") or meta.get("file_name") or run.name
     full_text = " ".join(x["text"] for x in transcript).strip()
 
@@ -1046,12 +1059,25 @@ def render(args) -> tuple[str, dict]:
         global_presence, person_segments, avg_cut, brightness, saturation, contrast,
     )
 
+    brief_parts = []
+    if selling_points:
+        brief_parts.append("已确认卖点（口播和画面优先表现）：" + "；".join(f"{i + 1}) {point}" for i, point in enumerate(selling_points)) + "。")
+    if product_brief["use_scene"]:
+        brief_parts.append(f"使用场景：{product_brief['use_scene']}。")
+    if product_brief["target_audience"]:
+        brief_parts.append(f"目标用户：{product_brief['target_audience']}。")
+    if product_brief["price_offer"]:
+        brief_parts.append(f"价格/优惠口径（用户已确认，可使用）：{product_brief['price_offer']}。")
+    if product_brief["cta"]:
+        brief_parts.append(f"行动号召（结尾 CTA 沿用）：{product_brief['cta']}。")
+    brief_line = (" " + " ".join(brief_parts)) if brief_parts else ""
+
     global_prompt = "\n".join([
         f"生成一条 {ratio} 写实商品视频，总时长约 {duration:.1f} 秒，共 {len(segments)} 个硬切镜头，整体构图、景别、光线、色调、镜头运动、剪辑密度和商品展示顺序参考对标视频。{style}",
         fixed_subject,
         f"固定场景：{scene}",
         f"镜头与光线：{camera} {lighting}",
-        f"主体商品为「{product_name}」，必须绑定用户商品参考图：{product_image}。{product_notes} 原片品牌、包装、logo、型号、参数、价格、折扣、配件和功效只作证据，不直接复制；没有用户确认就不生成。",
+        f"主体商品为「{product_name}」，必须绑定用户商品参考图：{product_image}。{product_notes} 原片品牌、包装、logo、型号、参数、价格、折扣、配件和功效只作证据，不直接复制；没有用户确认就不生成。{brief_line}",
         "原片无人就不新增人物；只露手的视频不生成完整人物或正脸；真人视频则人物、服装、发型、配饰必须全片一致。商品不能融化、变形、结构错位、数量增减，也不能被手部遮挡关键外观。",
         f"声音：{audio}",
     ])
@@ -1066,6 +1092,20 @@ def render(args) -> tuple[str, dict]:
         "每个镜头都必须有明确商品展示或销售任务，避免空泛氛围镜头。",
         "本地 Vision 的 people/adult/art 等粗标签不能当作精确年龄、族裔、品牌或场景结论。",
     ]
+    if product_brief["banned_words"]:
+        constraints.append(f"口播稿、屏幕文字和字幕不得出现以下禁用词：{product_brief['banned_words']}。")
+    if pref_voice == "zh":
+        constraints.append("配音语言：中文；口播稿与后期配音按中文处理，可意译原片口播，不逐字翻译。")
+    elif pref_voice == "en":
+        constraints.append("配音语言：英文；口播稿与后期配音按英文处理。")
+    elif pref_voice == "other":
+        constraints.append("配音语言：由用户后期指定；口播稿只保留结构和时长，不锁定语言。")
+    if pref_ratio in {"9:16", "1:1", "16:9"} and pref_ratio != str(meta.get("ratio") or ""):
+        constraints.append(f"用户指定输出画幅 {pref_ratio}；构图按 {pref_ratio} 重新取景，主体保持完整不裁切。")
+    if pref_strength == "medium":
+        constraints.append("复刻强度：中度；保留痛点→商品出场→证明→CTA 的销售结构和镜头时长节奏，允许替换场景、人物外观和具体道具。")
+    elif pref_strength == "light":
+        constraints.append("复刻强度：只参考打法；只沿用开钩方式、销售结构和时长节奏，镜头调度、场景和人物可以重新设计。")
 
     shot_prompts = []
     shot_records = []
@@ -1202,6 +1242,7 @@ def render(args) -> tuple[str, dict]:
         profile_lines.append(f"{_profile_label}: {_entry['summary']}")
     master_parts.append("\n".join(profile_lines))
 
+    master_parts.append("【硬约束】\n" + "\n".join(f"- {x}" for x in constraints))
     if full_text:
         master_parts.append("【声音后期】\n视频生成阶段不依赖模型现场说清完整口播；先用自然说话状态生成画面，再用用户确认后的配音稿、BGM 和字幕在后期对齐。")
     else:
